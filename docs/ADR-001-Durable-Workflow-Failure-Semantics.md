@@ -1,8 +1,8 @@
 # ADR-001: Durable Workflow and Failure Semantics
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-05
-- **Decision owners:** #todo Add owner or reviewer names.
+- **Decision owner:** Madhura Phadke
 - **Related:** [DurableAgent project one-pager](DurableAgent_Project_OnePager.md)
 
 ## Context
@@ -22,7 +22,7 @@ Use one Temporal workflow execution per investigation. Keep orchestration determ
 - Temporal workflow ID: `investigation/{quality_check_id}`.
 - Reject a second active workflow with the same ID.
 - Treat a new investigation of the same quality check as a new logical attempt with an explicit attempt suffix or reset policy.
-- #todo Choose the rerun identity: `investigation/{quality_check_id}/{attempt}` or a caller-supplied investigation ID.
+- Use the rerun identity: `investigation/{quality_check_id}/{attempt}`.
 - Attach the workflow ID and investigation ID to every Langfuse trace, activity log, and idempotency record.
 
 Temporal run IDs are diagnostic metadata only. They must not be part of idempotency keys because a continue-as-new operation or workflow retry can change the run ID while preserving the same logical investigation.
@@ -45,23 +45,18 @@ The workflow advances a typed `InvestigationState` through these states:
 | `COMPLETED` | Report location and terminal summary | End |
 | `FAILED` | Failure class, failed stage, attempts, and diagnostic reference | End or operator action |
 
-State transitions are monotonic. The workflow does not move backward or erase a completed stage. Temporal event history is the authoritative durable record; typed state is also exposed through a query for demo inspection. For this bounded demo, continue-as-new is unnecessary unless history growth becomes material.
-
-- #todo Decide whether rejection ends the investigation with a report, or allows a revised remediation plan and another approval cycle. Recommended for the 15-hour scope: end with a rejected report.
+State transitions are monotonic. The workflow does not move backward or erase a completed stage. Temporal event history is the authoritative durable record; typed state is also exposed through a query for demo inspection. For this bounded demo, continue-as-new is unnecessary unless history growth becomes material. Rejection ends the investigation after the rejected report is exported; revising the remediation plan requires a new investigation attempt.
 
 ### Step and Activity Boundaries
 
 1. **Ingest:** Validate and normalize workflow input in deterministic workflow code. Invalid input fails permanently before any external operation.
 2. **Retrieve evidence:** One read-only activity queries local metadata, lineage, change history, and prior incidents and returns a typed evidence bundle.
-3. **Investigate:** One idempotent LLM activity returns structured, evidence-cited hypotheses and confidence.
+3. **Investigate:** One idempotent LLM activity returns structured, evidence-cited hypotheses and confidence. A confidence score below `0.70` is considered low.
 4. **Assess impact:** One deterministic computation over lineage data when practical; use an activity only if it performs I/O.
 5. **Plan remediation:** One idempotent LLM activity consumes the persisted diagnosis and impact assessment and returns a typed plan.
-6. **Approve:** The workflow records an approval request and waits for a Temporal signal. A pipeline retry always requires approval. Low confidence is recorded as an additional approval reason rather than creating a separate gate.
+6. **Approve:** The workflow records an approval request and waits for a Temporal signal. Every pipeline retry requires approval, including retries proposed by high-confidence investigations. Low confidence is recorded as an additional approval reason rather than creating a separate gate.
 7. **Retry pipeline:** One idempotent side-effecting activity invokes the simulated pipeline-control tool.
 8. **Export report:** One idempotent activity writes a terminal report for completed, rejected, or failed investigations.
-
-- #todo Set the low-confidence threshold. Recommended initial value: confidence `< 0.70`.
-- #todo Decide whether a high-confidence investigation still needs approval before retry. The current decision assumes yes, matching the project success criteria.
 
 ### Retry and Timeout Policy
 
@@ -74,7 +69,7 @@ Errors are classified before retrying:
 | Indeterminate side effect | Timeout after dispatching pipeline retry or report write | Retry with the same idempotency key and recover the stored result |
 | Worker/process crash | Kill during any activity or wait state | Temporal schedules recovery; completed results are replayed from history |
 
-Initial activity defaults:
+Use the following timeout and attempt values as the initial defaults. Revisit them only if provider or local-environment testing demonstrates a need:
 
 - Evidence retrieval: 3 attempts, 10-second start-to-close timeout.
 - LLM activities: 3 attempts, 60-second start-to-close timeout, 1-second initial backoff, coefficient 2, 15-second maximum backoff.
@@ -82,9 +77,6 @@ Initial activity defaults:
 - Report export: 3 attempts, 10-second start-to-close timeout.
 - Do not retry non-retryable application errors.
 - Langfuse export failure must not fail the business workflow; record locally and allow best-effort telemetry retry.
-
-- #todo Confirm these timeout and attempt values after choosing the model provider and local Temporal environment.
-- #todo Choose approval expiry behavior and duration. Recommended demo behavior: no automatic expiry; expose cancellation as a separate signal.
 
 ### Idempotency Strategy
 
@@ -113,10 +105,9 @@ Before executing an operation, the activity checks a durable idempotency record 
 
 The idempotency record contains the key, operation type, input hash, status, lease expiry, attempt count, result or result reference, and timestamps. Reusing a key with a different input hash is a permanent error.
 
-For the demo, use a transactional local store shared across worker restarts. The simulated pipeline-control operation and its idempotency record must commit atomically. Reports are written to a temporary file and atomically renamed to a deterministic path; an existing report with the same input hash is returned as success.
+For the demo, use SQLite as the transactional local store shared across worker restarts. The simulated pipeline-control operation and its idempotency record must commit atomically. Reports are written to a temporary file and atomically renamed to a deterministic path; an existing report with the same input hash is returned as success.
 
-- #todo Choose the local idempotency store. Recommended: SQLite, because it supports atomic claims and survives worker restarts without adding infrastructure.
-- #todo Choose the LLM provider and verify whether it accepts provider-side idempotency keys. Without that support, a crash after the provider completes but before the local result commits can cause a duplicate provider call and charge, although downstream application effects remain deduplicated. This limitation must be shown honestly in the README.
+Use Microsoft Foundry (formerly Azure AI Foundry) as the LLM provider. As of 2026-09-05, the published [Foundry chat-completions documentation](https://learn.microsoft.com/azure/foundry/openai/how-to/chatgpt) and [REST API reference](https://learn.microsoft.com/azure/foundry/openai/reference) do not document a provider-side idempotency key or duplicate-request suppression guarantee. DurableAgent must therefore treat model requests as non-idempotent at the provider boundary and rely on its SQLite idempotency record and cached result when a result has been persisted. A crash after Foundry completes a request but before the local result commits can still cause a duplicate model call and charge, although downstream application effects remain deduplicated. Document this limitation in the README.
 
 ### Human Approval
 
@@ -127,9 +118,9 @@ The workflow enters `AWAITING_APPROVAL` before pipeline retry and waits without 
 - Approver identity and optional comment.
 - Decision timestamp supplied by workflow time, not wall-clock code in an activity.
 
-The workflow accepts only the first valid decision for the current plan version. Duplicate identical signals are no-ops. Conflicting or stale signals are recorded and rejected. Approval authorizes only the exact persisted remediation plan and does not itself execute the retry.
+The workflow accepts only the first valid decision for the current plan version. Duplicate identical signals are no-ops. Conflicting or stale signals are recorded and rejected. Approval authorizes only the exact persisted remediation plan and does not itself execute the retry. Approval requests do not expire automatically; a `CANCEL` signal ends a waiting investigation.
 
-- #todo Define who may approve in the demo. Recommended: accept a CLI-provided non-empty approver name and state clearly that production authorization is out of scope.
+For the demo, any CLI caller who supplies a non-empty approver name may submit a decision. The approver name is recorded for auditability but is not authenticated or authorized; production approval authorization is out of scope.
 
 ### Observability and Failure Injection
 
@@ -139,9 +130,7 @@ The workflow accepts only the first valid decision for the current plan version.
 - Make telemetry resilient to replay by assigning stable observation IDs where supported.
 - Inject deterministic failures at named activity boundaries, including after an operation commits but before its result is returned.
 
-The required recovery tests kill or fail the worker after evidence retrieval, after an LLM result is stored, after pipeline retry commits, and after report creation. On restart, they assert terminal completion and exactly one completed record for each protected operation.
-
-- #todo Select the primary crash point for the recorded demo. Recommended: after remediation-plan persistence and before approval, with the after-side-effect cases covered by automated tests.
+The required recovery tests kill or fail the worker after evidence retrieval, after an LLM result is stored, after pipeline retry commits, and after report creation. On restart, they assert terminal completion and exactly one completed record for each protected operation. The recorded demo uses a crash after remediation-plan persistence and before approval; automated tests cover the after-side-effect failure cases.
 
 ## Invariants
 
@@ -189,6 +178,6 @@ The required recovery tests kill or fail the worker after evidence retrieval, af
 - Verify every report claim references an evidence ID present in the persisted evidence bundle.
 - Correlate the Temporal workflow and Langfuse trace using the investigation and workflow IDs.
 
-## Deferred Decisions
+## Deferred Scope
 
-Resolve every `#todo` before changing this ADR to **Accepted**. Authentication, production data-system integration, multi-tenant isolation, Kubernetes deployment, and automated remediation remain out of scope.
+Authentication, production data-system integration, multi-tenant isolation, Kubernetes deployment, and automated remediation remain out of scope for this reference implementation.
