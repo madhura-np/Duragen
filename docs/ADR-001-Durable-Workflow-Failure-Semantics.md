@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-09-05
-- **Decision owner:** Madhura Phadke
+- **Decision owner:** Project maintainers
 - **Related:** [DurableAgent project one-pager](DurableAgent_Project_OnePager.md)
 
 ## Context

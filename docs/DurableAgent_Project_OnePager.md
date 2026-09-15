@@ -33,6 +33,13 @@ Each step records durable state. LLM calls and tool operations use idempotency k
 
 Out of scope: custom orchestration infrastructure, a custom trace backend, multi-tenant authentication, a polished web UI, vector-database deployment, Kubernetes, connections to production data systems, and automated remediation beyond a simulated retry.
 
+## Core And Premise
+
+- **Core:** An orchestration-independent reliability pattern that persists agent progress, resumes from durable boundaries, retries transient failures, pauses for external input, and prevents duplicate side effects.
+- **Required guarantees:** Durable state, recoverable task execution, explicit retries and timeouts, and idempotent side effects; none inherently require Temporal.
+- **Reference implementation:** Temporal supplies these primitives without requiring a custom workflow engine. It is the selected orchestration technology, not the defining idea of DurableAgent.
+- **Portability:** The pattern could use Azure Durable Functions, the Durable Task Framework, or another orchestrator with equivalent persistence, recovery, coordination, and retry semantics.
+
 ## Demo Deliverable
 
 A public repository and a three-to-five-minute recorded demo that shows:

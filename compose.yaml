@@ -1,0 +1,22 @@
+services:
+  temporal:
+    image: temporalio/temporal:1.8.3
+    user: "0:0"
+    command:
+      - server
+      - start-dev
+      - --ip
+      - 0.0.0.0
+      - --ui-ip
+      - 0.0.0.0
+      - --db-filename
+      - /var/lib/temporal/temporal.db
+    ports:
+      - "7233:7233"
+      - "8233:8233"
+    volumes:
+      - temporal-data:/var/lib/temporal
+    restart: unless-stopped
+
+volumes:
+  temporal-data:
